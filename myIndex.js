@@ -1,31 +1,20 @@
 const express = require('express')
 const app = express()
 const cors = require('cors')
-const bodyParser = require('body-parser');
-const mongoose = require('mongoose');
-const { Schema } = mongoose;
-require('dotenv').config();
+const bodyParser = require('body-parser')
+require('dotenv').config()
+const mongoose = require('mongoose')
 
-const MONGO_URL = process.env.MONGO_URL;
-mongoose.connect(MONGO_URL);
-// User schema
-const userSchema = new Schema({
-  username: String
-});
-// Exercise schema
-const exerciseSchema = new Schema({
-  user_id: { 
-    type: String,
-    required: true },
-  description: String,
-  duration: Number,
-  date: Date,
+// Connect to MongoDB
+mongoose.connect(process.env.MONGO_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
 })
+.then(() => console.log('✅ Connected to MongoDB'))
+.catch((err) => console.error('❌ MongoDB connection error:', err));
 
-const User = mongoose.model('User', userSchema);
-const Exercise = mongoose.model("Exercise", exerciseSchema);
-// parse application/x-www-form-urlencoded
-app.use(bodyParser.urlencoded({ extended: false }))
+// use the body parser for post requests
+app.use(bodyParser.urlencoded({ extended: true }))
 
 app.use(cors())
 app.use(express.static('public'))
@@ -33,94 +22,146 @@ app.get('/', (req, res) => {
   res.sendFile(__dirname + '/views/index.html')
 });
 
-// GET request to /api/users to get a list of all users.
-app.get('/api/users', async function(req, res) {
-  const users = await User.find({}).select("_id username");
-  if(!users) {
-    res.json("User not found")
-  } else {
-    res.json(users)
+// define schema and model from mongoose
+const { Schema, model } = require('mongoose');
+const { type } = require('express/lib/response')
+
+// define a new schema for user
+const userSchema = new Schema({
+  username: {type: String}
+})
+
+// define a new exercise schema
+const exerciseSchema = new Schema({
+  userId: {type: Schema.Types.ObjectId, ref: 'User', required: true},
+  description: {type: String, required: true},
+  duration: {type: Number, required: true},
+  date: {type: Date}
+})
+
+// define a model for the new user and exercise schema
+const User = model('User', userSchema);
+const Exercise = model('Exercise', exerciseSchema);
+
+// POST user info
+app.post('/api/users', async (req, res) => {
+  // get user name
+  const username = req.body.username;
+  
+  try {
+    // define the new user from the input and save it
+    const newUser = new User({ username });
+    const savedUser = await newUser.save();
+
+    // send the json format
+    res.json({
+      _id: savedUser._id,
+      username: username
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to save user" })
   }
 })
 
-// POST /api/users will be an object with username and _id properties.
-app.post('/api/users', async function(req, res) {
-  const users = new User({
-    username: req.body.username
-  })
-  try{
-    const user = await users.save()
-    res.json(user)
-  } catch(err) {
-    console.log(err)
+// GET users info
+app.get('/api/users', async (req, res) => {
+  try {
+    const users = await User.find({}, '_id username');
+    res.json(users);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to fetch users" })
   }
 })
-// POST /api/users/:_id/exercises will be the user object with the exercise fields added
-app.post('/api/users/:_id/exercises', async function(req, res) {
+
+// POST exercise details
+app.post('/api/users/:_id/exercises', async (req, res) => {
   const id = req.params._id;
   const { description, duration, date } = req.body;
-  try{
+
+  try {
+    // find the user by id
     const user = await User.findById(id);
-    if(!user) {
-      res.send("No data")
-    } else {
-      const exercises = new Exercise({
-        user_id: user._id,
-        description,
-        duration,
-        date: date ? new Date(date) : new Date()
-      });
-      const exercise = await exercises.save();
-      res.json({
-        _id: user._id,
-        username: user.username,
-        description: exercise.description,
-        duration: exercise.duration,
-        date: new Date(exercise.date).toDateString()
-      })
-    }
+
+    // if user isn't found
+    if (!user) return res.json({ error: "User not found" })
+
+    // if no date is inserted
+    const exerciseDate = date ? new Date(date) : new Date();
     
-  } catch(err) {
-    console.log(err)
+    // create new exercise
+    const newExercise = new Exercise({
+      userId: user._id,
+      description,
+      duration: parseInt(duration),
+      date: exerciseDate
+    });
+
+    // save the new exercise
+    await newExercise.save();
+
+    // post new exercise in json format
+    res.json({
+      _id: user._id,
+      username: user.username,
+      date: exerciseDate.toDateString(),
+      duration: parseInt(duration),
+      description
+    })
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Could not post exercises" })
   }
 })
 
-// GET exercises from all users
-app.get('/api/users/:_id/logs', async function(req, res) {
+// GET list of all logged exercises from a user
+app.get('/api/users/:_id/logs', async (req, res) => {
+  const userId = req.params._id;
   const { from, to, limit } = req.query;
-  const id = req.params._id;
-  const user = await User.findById(id);
-  if(!user) {
-    res.send("User not found");
-    return;
-  }
-  let dateObj = {};
-  if(from) {
-    dateObj["$gte"] = new Date(from)
-  }
-  if(to){
-    dateObj["$lte"] = new Date(to)
-  }
-  let filter = {
-    user_id: id
-  }
-  if(from || to) {
-    filter.date = dateObj;
-  }
-  const exercises = await Exercise.find(filter).limit(+limit ?? 500);
-  const log = exercises.map(e => ({
-    description: e.description,
-    duration: e.duration,
-    date: e.date.toDateString()
-  }));
-  res.json({
-    username: user.username,
-    count: exercises.length,
-    _id: user._id,
-    log
-  })
-})
 
+  try {
+    const user = await User.findById(userId);
+    if (!user) return res.json({ error: 'User not found' });
+
+    const query = { userId };
+
+    if (from || to) {
+      query.date = {}
+      if (from) query.date.$gte = new Date(from);
+      if (to) query.date.$lte = new Date(to);
+    }
+
+    let exerciseQuery = Exercise.find(query).select('description duration date');
+
+    if (limit) {
+      exerciseQuery = exerciseQuery.limit(parseInt(limit));
+    };
+
+    const exercises = await exerciseQuery.exec();
+
+    // Format logs
+    const log = exercises.map(e => ({
+      description: e.description,
+      duration: e.duration,
+      date: e.date.toDateString()
+    }));
+
+    res.json({
+      _id: user._id,
+      username: user.username,
+      count: log.length,
+      log: log
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'could not fetch exercise logs' })
+  }
+})
 const listener = app.listen(process.env.PORT || 3000, () => {
   console.log('Your app is listening on port ' + listener.address().port)
 })
+
+module.exports = User;
